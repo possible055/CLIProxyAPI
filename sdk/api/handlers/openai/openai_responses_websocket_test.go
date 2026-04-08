@@ -397,15 +397,6 @@ func TestWebsocketJSONPayloadsFromPlainJSONChunk(t *testing.T) {
 	}
 }
 
-func TestNormalizeJSONArrayRaw(t *testing.T) {
-	raw := []byte(`[{"type":"message","text":"hello"}]`)
-	got := normalizeJSONArrayRaw(raw)
-	if got != string(raw) {
-		t.Errorf("normalizeJSONArrayRaw() = %v, want %v", got, string(raw))
-	}
-}
-
-
 func TestResponseCompletedOutputFromPayload(t *testing.T) {
 	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"message","id":"out-1"}]}}`)
 

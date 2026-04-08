@@ -123,7 +123,6 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		var requestJSON []byte
 		var updatedLastRequest []byte
 		var errMsg *interfaces.ErrorMessage
-		log.Debugf("[ResponsesWebsocket] incoming raw payload: %s", string(payload))
 		requestJSON, updatedLastRequest, errMsg = normalizeResponsesWebsocketRequestWithMode(
 			payload,
 			lastRequest,
@@ -131,7 +130,6 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastResponseID,
 			allowIncrementalInputWithPreviousResponseID,
 		)
-		log.Debugf("[ResponsesWebsocket] normalized request to upstream: %s", string(requestJSON))
 		if errMsg != nil {
 			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 			markAPIResponseTimestamp(c)
@@ -194,10 +192,6 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				}
 			})
 		}
-		log.Debugf("[ResponsesWebsocket] sending to upstream: previous_response_id=%q, input_items=%d, model=%q",
-			gjson.GetBytes(requestJSON, "previous_response_id").String(),
-			len(gjson.GetBytes(requestJSON, "input").Array()),
-			gjson.GetBytes(requestJSON, "model").String())
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 
 		completedResponseID, completedOutput, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsBodyLog, passthroughSessionID)
@@ -209,7 +203,6 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		lastResponseID = completedResponseID
 		lastResponseOutput = completedOutput
-		log.Debugf("[ResponsesWebsocket] updated lastResponseID=%q, output_items=%d", lastResponseID, len(gjson.ParseBytes(lastResponseOutput).Array()))
 	}
 }
 
@@ -233,8 +226,6 @@ func normalizeResponsesWebsocketRequest(rawJSON []byte, lastRequest []byte, last
 
 func normalizeResponsesWebsocketRequestWithMode(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte, lastResponseID string, allowIncrementalInputWithPreviousResponseID bool) ([]byte, []byte, *interfaces.ErrorMessage) {
 	requestType := strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String())
-	log.Debugf("[normalizeResponsesWebsocketRequestWithMode] requestType=%s, lastResponseID=%q, hasLastRequest=%v, allowIncremental=%v",
-		requestType, lastResponseID, len(lastRequest) > 0, allowIncrementalInputWithPreviousResponseID)
 	switch requestType {
 	case wsRequestTypeCreate:
 		// log.Infof("responses websocket: response.create request")
@@ -688,7 +679,6 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	sessionID string,
 ) (string, []byte, error) {
 	completed := false
-	var accumulatedOutput [][]byte
 	completedOutput := []byte("[]")
 	var completedResponseID string
 
@@ -769,30 +759,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
 				eventType := gjson.GetBytes(payloads[i], "type").String()
-				
-				// Keep track of streaming output items for backends that don't embed the full array in response.done
-				if eventType == "response.output_item.done" {
-					item := gjson.GetBytes(payloads[i], "item")
-					if item.Exists() {
-						if accumulatedOutput == nil {
-							accumulatedOutput = make([][]byte, 0)
-						}
-						accumulatedOutput = append(accumulatedOutput, []byte(item.Raw))
-					}
-				}
-
-				// Codex SSE upstream sends "response.done"; WebSocket upstream sends "response.completed".
-				// Both signal the end of a response and carry the final output array.
-				if eventType == wsEventTypeCompleted || eventType == "response.done" {
+				if eventType == wsEventTypeCompleted {
 					completed = true
 					completedResponseID, completedOutput = responseCompletedOutputFromPayload(payloads[i])
-					
-					// If the backend didn't give us a populated output array, use the accumulated stream.
-					if len(gjson.GetBytes(completedOutput, "@this").Array()) == 0 && len(accumulatedOutput) > 0 {
-						merged := "[" + string(bytes.Join(accumulatedOutput, []byte(","))) + "]"
-						completedOutput = []byte(merged)
-					}
-					accumulatedOutput = nil // Reset for next iteration
 				}
 				markAPIResponseTimestamp(c)
 				appendWebsocketEvent(wsBodyLog, "response", payloads[i])
@@ -819,10 +788,8 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 }
 
 func responseCompletedOutputFromPayload(payload []byte) (string, []byte) {
-	log.Debugf("[responseCompletedOutputFromPayload] DEBUG FULL RAW PAYLOAD: %s", string(payload))
 	output := gjson.GetBytes(payload, "response.output")
 	responseID := gjson.GetBytes(payload, "response.id").String()
-	log.Debugf("[responseCompletedOutputFromPayload] extracted response_id=%q, output_items=%d, exists=%v, is_array=%v", responseID, len(output.Array()), output.Exists(), output.IsArray())
 	if output.Exists() && output.IsArray() {
 		return responseID, bytes.Clone([]byte(output.Raw))
 	}
