@@ -97,6 +97,65 @@ func TestToolCallSimple(t *testing.T) {
 	}
 }
 
+// Some clients omit tool_calls[].type even though OpenAI's schema includes it.
+// If we drop the tool call, the subsequent tool output becomes an orphaned
+// function_call_output and OpenAI Responses rejects it.
+func TestToolCallMissingTypeDefaultsToFunction(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Call a tool"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{
+						"id": "call_missing_type",
+						"function": {"name": "do_thing", "arguments": "{}"}
+					}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_missing_type", "content": "done"}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "do_thing",
+					"description": "Do a thing",
+					"parameters": {"type": "object", "properties": {}}
+				}
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	items := gjson.Get(result, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("expected 3 input items (user + function_call + function_call_output), got %d: %s", len(items), gjson.Get(result, "input").Raw)
+	}
+
+	if items[0].Get("type").String() != "message" || items[0].Get("role").String() != "user" {
+		t.Fatalf("item 0: expected user message, got: %s", items[0].Raw)
+	}
+
+	if items[1].Get("type").String() != "function_call" {
+		t.Fatalf("item 1: expected function_call, got: %s", items[1].Raw)
+	}
+	if items[1].Get("call_id").String() != "call_missing_type" {
+		t.Fatalf("item 1: expected call_id 'call_missing_type', got '%s'", items[1].Get("call_id").String())
+	}
+
+	if items[2].Get("type").String() != "function_call_output" {
+		t.Fatalf("item 2: expected function_call_output, got: %s", items[2].Raw)
+	}
+	if items[2].Get("call_id").String() != "call_missing_type" {
+		t.Fatalf("item 2: expected call_id 'call_missing_type', got '%s'", items[2].Get("call_id").String())
+	}
+}
+
 // Assistant has both text content and tool_calls — the message should
 // be emitted (non-empty content), followed by function_call items.
 func TestToolCallWithContent(t *testing.T) {

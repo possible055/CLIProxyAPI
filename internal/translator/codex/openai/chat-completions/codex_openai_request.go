@@ -211,7 +211,8 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 						toolCallsArr := toolCalls.Array()
 						for j := 0; j < len(toolCallsArr); j++ {
 							tc := toolCallsArr[j]
-							if tc.Get("type").String() == "function" {
+							t := tc.Get("type").String()
+							if t == "function" || t == "" {
 								// Create function_call as top-level object
 								funcCall := []byte(`{}`)
 								funcCall, _ = sjson.SetBytes(funcCall, "type", "function_call")
