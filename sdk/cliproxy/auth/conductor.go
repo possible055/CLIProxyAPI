@@ -774,7 +774,7 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
+func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, routeModel, resultModel string, opts cliproxyexecutor.Options, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -783,11 +783,13 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
 			if chunk.Err != nil && !failed {
 				failed = true
+				originalErr := chunk.Err
 				rerr := &Error{Message: chunk.Err.Error()}
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](chunk.Err); ok && se != nil {
 					rerr.HTTPStatus = se.StatusCode()
 				}
 				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr})
+				chunk.Err = m.normalizeContinuationFailure([]string{provider}, routeModel, opts, originalErr)
 			}
 			if !forward {
 				return false
@@ -844,6 +846,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
+			if shouldStopContinuationFailover(provider, opts, errStream) {
+				return nil, errStream
+			}
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
@@ -877,6 +882,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
+				if shouldStopContinuationFailover(provider, opts, bootstrapErr) {
+					return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+				}
 				lastErr = bootstrapErr
 				continue
 			}
@@ -908,7 +916,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, resultModel, opts, streamResult.Headers, buffered, remaining), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
@@ -1207,7 +1215,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 				return resp, nil
 			}
 		}
-		return cliproxyexecutor.Response{}, lastErr
+		return cliproxyexecutor.Response{}, m.normalizeContinuationFailure(normalized, req.Model, opts, lastErr)
 	}
 	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
@@ -1237,7 +1245,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		}
 	}
 	if lastErr != nil {
-		return cliproxyexecutor.Response{}, lastErr
+		return cliproxyexecutor.Response{}, m.normalizeContinuationFailure(normalized, req.Model, opts, lastErr)
 	}
 	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
@@ -1273,7 +1281,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 				return result, nil
 			}
 		}
-		return nil, lastErr
+		return nil, m.normalizeContinuationFailure(normalized, req.Model, opts, lastErr)
 	}
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
@@ -1337,6 +1345,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					result.RetryAfter = ra
 				}
 				m.MarkResult(execCtx, result)
+				if shouldStopContinuationFailover(provider, opts, errExec) {
+					return cliproxyexecutor.Response{}, errExec
+				}
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
@@ -1415,6 +1426,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					result.RetryAfter = ra
 				}
 				m.MarkResult(execCtx, result)
+				if shouldStopContinuationFailover(provider, opts, errExec) {
+					return cliproxyexecutor.Response{}, errExec
+				}
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
@@ -1448,7 +1462,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if lastErr != nil {
 				var bootstrapErr *streamBootstrapError
 				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
-					return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
+					safeErr := m.normalizeContinuationFailure(providers, routeModel, opts, bootstrapErr.cause)
+					return streamErrorResult(bootstrapErr.Headers(), safeErr), nil
 				}
 				return nil, lastErr
 			}
@@ -1459,7 +1474,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if lastErr != nil {
 				var bootstrapErr *streamBootstrapError
 				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
-					return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
+					safeErr := m.normalizeContinuationFailure(providers, routeModel, opts, bootstrapErr.cause)
+					return streamErrorResult(bootstrapErr.Headers(), safeErr), nil
 				}
 				return nil, lastErr
 			}
@@ -1485,6 +1501,14 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
+			}
+			if shouldStopContinuationFailover(provider, opts, errStream) {
+				var bootstrapErr *streamBootstrapError
+				if errors.As(errStream, &bootstrapErr) && bootstrapErr != nil {
+					safeErr := m.normalizeContinuationFailure([]string{provider}, routeModel, opts, bootstrapErr.cause)
+					return streamErrorResult(bootstrapErr.Headers(), safeErr), nil
+				}
+				return nil, errStream
 			}
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
@@ -1533,6 +1557,129 @@ func hasRequestedModelMetadata(meta map[string]any) bool {
 	default:
 		return false
 	}
+}
+
+func (m *Manager) normalizeContinuationFailure(providers []string, routeModel string, opts cliproxyexecutor.Options, err error) error {
+	if err == nil {
+		return nil
+	}
+	if !requestRequiresPreviousResponseAffinity(opts) {
+		return err
+	}
+	if !providerListIncludes(providers, "codex") {
+		return err
+	}
+	if !isContinuationQuotaFailure(err) {
+		return err
+	}
+
+	resetIn := time.Duration(0)
+	if retryAfter := retryAfterFromError(err); retryAfter != nil && *retryAfter > 0 {
+		resetIn = *retryAfter
+	} else if wait, ok := m.continuationCooldownWait(providers, routeModel); ok {
+		resetIn = wait
+	}
+	return newModelCooldownError(routeModel, "codex", resetIn)
+}
+
+func shouldStopContinuationFailover(provider string, opts cliproxyexecutor.Options, err error) bool {
+	if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		return false
+	}
+	if !requestRequiresPreviousResponseAffinity(opts) {
+		return false
+	}
+	return isContinuationQuotaFailure(err)
+}
+
+func providerListIncludes(providers []string, provider string) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return false
+	}
+	for _, candidate := range providers {
+		if strings.EqualFold(strings.TrimSpace(candidate), provider) {
+			return true
+		}
+	}
+	return false
+}
+
+func isContinuationQuotaFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if status == http.StatusTooManyRequests {
+		return true
+	}
+	switch status {
+	case http.StatusBadRequest, http.StatusPaymentRequired, http.StatusForbidden:
+		return isQuotaLikeErrorMessage(err.Error())
+	default:
+		return false
+	}
+}
+
+func isQuotaLikeErrorMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "usage_limit_reached") ||
+		strings.Contains(lower, "usage limit") ||
+		strings.Contains(lower, "insufficient_quota") ||
+		strings.Contains(lower, "credit balance") ||
+		strings.Contains(lower, "balance is too low") ||
+		strings.Contains(lower, "quota")
+}
+
+func (m *Manager) continuationCooldownWait(providers []string, model string) (time.Duration, bool) {
+	if m == nil || len(providers) == 0 {
+		return 0, false
+	}
+	providerSet := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		key := strings.ToLower(strings.TrimSpace(provider))
+		if key != "" {
+			providerSet[key] = struct{}{}
+		}
+	}
+	if len(providerSet) == 0 {
+		return 0, false
+	}
+
+	now := time.Now()
+	found := false
+	minWait := time.Duration(0)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+		if _, ok := providerSet[providerKey]; !ok {
+			continue
+		}
+		checkModel := strings.TrimSpace(model)
+		if checkModel != "" {
+			checkModel = m.selectionModelForAuth(auth, checkModel)
+		}
+		blocked, reason, next := isAuthBlockedForModel(auth, checkModel, now)
+		if !blocked || reason != blockReasonCooldown || next.IsZero() {
+			continue
+		}
+		wait := next.Sub(now)
+		if wait < 0 {
+			wait = 0
+		}
+		if !found || wait < minWait {
+			minWait = wait
+			found = true
+		}
+	}
+	return minWait, found
 }
 
 func pinnedAuthIDFromMetadata(meta map[string]any) string {
