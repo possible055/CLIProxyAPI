@@ -173,28 +173,40 @@ func authWebsocketsEnabled(auth *Auth) bool {
 	return false
 }
 
-func preferCodexWebsocketAuths(ctx context.Context, provider string, available []*Auth) []*Auth {
-	if len(available) == 0 {
-		return available
-	}
+func shouldPreferCodexWebsocketAuths(ctx context.Context, provider string) bool {
 	if !cliproxyexecutor.DownstreamWebsocket(ctx) {
-		return available
+		return false
 	}
-	if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
-		return available
+	providerKey := strings.TrimSpace(provider)
+	return strings.EqualFold(providerKey, "codex") || strings.EqualFold(providerKey, "mixed")
+}
+
+func codexWebsocketCandidate(provider string, auth *Auth) bool {
+	if !authWebsocketsEnabled(auth) {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(provider), "mixed") {
+		return strings.EqualFold(strings.TrimSpace(auth.Provider), "codex")
+	}
+	return true
+}
+
+func preferCodexWebsocketAuths(ctx context.Context, provider string, auths []*Auth) []*Auth {
+	if len(auths) == 0 || !shouldPreferCodexWebsocketAuths(ctx, provider) {
+		return auths
 	}
 
-	wsEnabled := make([]*Auth, 0, len(available))
-	for i := 0; i < len(available); i++ {
-		candidate := available[i]
-		if authWebsocketsEnabled(candidate) {
+	wsEnabled := make([]*Auth, 0, len(auths))
+	for i := 0; i < len(auths); i++ {
+		candidate := auths[i]
+		if codexWebsocketCandidate(provider, candidate) {
 			wsEnabled = append(wsEnabled, candidate)
 		}
 	}
 	if len(wsEnabled) > 0 {
 		return wsEnabled
 	}
-	return available
+	return auths
 }
 
 func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
@@ -261,11 +273,11 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	candidates := preferCodexWebsocketAuths(ctx, provider, auths)
+	available, err := getAvailableAuths(candidates, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
 	if s.cursors == nil {
@@ -360,11 +372,11 @@ func groupByVirtualParent(auths []*Auth) (map[string][]*Auth, []string) {
 func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	candidates := preferCodexWebsocketAuths(ctx, provider, auths)
+	available, err := getAvailableAuths(candidates, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
 	return available[0], nil
 }
 
@@ -434,6 +446,9 @@ var sessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
 // SessionAffinitySelector wraps another selector with session-sticky behavior.
 // It extracts session ID from multiple sources and maintains session-to-auth
 // mappings with automatic failover when the bound auth becomes unavailable.
+// Requests that continue an upstream Responses chain via previous_response_id
+// must stay on the bound auth because another auth cannot see that upstream
+// response.
 type SessionAffinitySelector struct {
 	fallback Selector
 	cache    *SessionCache
@@ -471,9 +486,10 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 // Priority for session ID extraction:
 //  1. metadata.user_id (Claude Code format) - highest priority
 //  2. X-Session-ID header
-//  3. metadata.user_id (non-Claude Code format)
-//  4. conversation_id field
-//  5. Hash-based fallback from messages
+//  3. execution_session_id metadata
+//  4. metadata.user_id (non-Claude Code format)
+//  5. conversation_id field
+//  6. Hash-based fallback from messages
 //
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
@@ -487,7 +503,8 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	candidates := preferCodexWebsocketAuths(ctx, provider, auths)
+	available, err := getAvailableAuths(candidates, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
@@ -499,6 +516,15 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			if auth.ID == cachedAuthID {
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return auth, nil
+			}
+		}
+		if requestRequiresPreviousResponseAffinity(opts) {
+			entry.Infof("session-affinity: cache hit but auth unavailable for previous response, refusing failover | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, provider, model)
+			return nil, &Error{
+				Code:       "auth_unavailable",
+				Message:    "session-bound auth unavailable for previous_response_id",
+				Retryable:  true,
+				HTTPStatus: http.StatusServiceUnavailable,
 			}
 		}
 		// Cached auth not available, reselect via fallback selector for even distribution
@@ -521,6 +547,15 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 					return auth, nil
 				}
 			}
+			if requestRequiresPreviousResponseAffinity(opts) {
+				entry.Infof("session-affinity: fallback cache hit but auth unavailable for previous response, refusing failover | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), cachedAuthID, provider, model)
+				return nil, &Error{
+					Code:       "auth_unavailable",
+					Message:    "session-bound auth unavailable for previous_response_id",
+					Retryable:  true,
+					HTTPStatus: http.StatusServiceUnavailable,
+				}
+			}
 		}
 	}
 
@@ -541,6 +576,14 @@ func selectorLogEntry(ctx context.Context) *log.Entry {
 		return log.WithField("request_id", reqID)
 	}
 	return log.NewEntry(log.StandardLogger())
+}
+
+func requestRequiresPreviousResponseAffinity(opts cliproxyexecutor.Options) bool {
+	if len(opts.OriginalRequest) == 0 {
+		return false
+	}
+	prev := gjson.GetBytes(opts.OriginalRequest, "previous_response_id")
+	return prev.Exists() && strings.TrimSpace(prev.String()) != ""
 }
 
 // truncateSessionID shortens session ID for logging (first 8 chars + "...")
@@ -570,9 +613,10 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 // Priority order:
 //  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority for Claude Code clients
 //  2. X-Session-ID header
-//  3. metadata.user_id (non-Claude Code format)
-//  4. conversation_id field in request body
-//  5. Stable hash from first few messages content (fallback)
+//  3. execution_session_id metadata
+//  4. metadata.user_id (non-Claude Code format)
+//  5. conversation_id field in request body
+//  6. Stable hash from first few messages content (fallback)
 func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
 	primary, _ := extractSessionIDs(headers, payload, metadata)
 	return primary
@@ -608,23 +652,46 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		}
 	}
 
+	// 3. Long-lived execution session metadata, used by downstream websocket bridges.
+	if sid := metadataStringValue(metadata, cliproxyexecutor.ExecutionSessionMetadataKey); sid != "" {
+		return "exec:" + sid, ""
+	}
+
 	if len(payload) == 0 {
 		return "", ""
 	}
 
-	// 3. metadata.user_id (non-Claude Code format)
+	// 4. metadata.user_id (non-Claude Code format)
 	userID := gjson.GetBytes(payload, "metadata.user_id").String()
 	if userID != "" {
 		return "user:" + userID, ""
 	}
 
-	// 4. conversation_id field
+	// 5. conversation_id field
 	if convID := gjson.GetBytes(payload, "conversation_id").String(); convID != "" {
 		return "conv:" + convID, ""
 	}
 
-	// 5. Hash-based fallback from message content
+	// 6. Hash-based fallback from message content
 	return extractMessageHashIDs(payload)
+}
+
+func metadataStringValue(metadata map[string]any, key string) string {
+	if len(metadata) == 0 || key == "" {
+		return ""
+	}
+	raw, ok := metadata[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
 }
 
 func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {

@@ -700,6 +700,200 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelector_PreviousResponseIDRefusesFailoverWhenCachedAuthUnavailable(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a"},
+		{ID: "auth-b"},
+	}
+	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344"},"input":[{"type":"message","role":"user","content":"hello"}]}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: payload}
+
+	first, err := selector.Pick(context.Background(), "codex", "gpt-5.5", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if first == nil {
+		t.Fatalf("Pick() returned nil")
+	}
+
+	for _, auth := range auths {
+		if auth.ID == first.ID {
+			auth.ModelStates = map[string]*ModelState{
+				"gpt-5.5": {
+					Unavailable:    true,
+					NextRetryAfter: time.Now().Add(time.Hour),
+				},
+			}
+		}
+	}
+
+	continuation := []byte(`{"metadata":{"user_id":"user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344"},"previous_response_id":"resp-1","input":[{"type":"message","role":"user","content":"continue"}]}`)
+	_, err = selector.Pick(context.Background(), "codex", "gpt-5.5", cliproxyexecutor.Options{OriginalRequest: continuation}, auths)
+	if err == nil {
+		t.Fatalf("Pick() error = nil, want auth_unavailable")
+	}
+	var authErr *Error
+	if !errors.As(err, &authErr) {
+		t.Fatalf("Pick() error type = %T, want *Error", err)
+	}
+	if authErr.Code != "auth_unavailable" {
+		t.Fatalf("error code = %q, want auth_unavailable", authErr.Code)
+	}
+	if authErr.HTTPStatus != http.StatusServiceUnavailable {
+		t.Fatalf("HTTPStatus = %d, want %d", authErr.HTTPStatus, http.StatusServiceUnavailable)
+	}
+}
+
+func TestSessionAffinitySelector_PreviousResponseIDRefusesFallbackFailoverWhenCachedAuthUnavailable(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a"},
+		{ID: "auth-b"},
+	}
+	firstTurn := []byte(`{
+		"instructions": "system prompt",
+		"input": [
+			{"type":"message","role":"user","content":"hello"}
+		]
+	}`)
+	first, err := selector.Pick(context.Background(), "codex", "gpt-5.5", cliproxyexecutor.Options{OriginalRequest: firstTurn}, auths)
+	if err != nil {
+		t.Fatalf("Pick() first turn error = %v", err)
+	}
+	if first == nil {
+		t.Fatalf("Pick() first turn returned nil")
+	}
+
+	for _, auth := range auths {
+		if auth.ID == first.ID {
+			auth.ModelStates = map[string]*ModelState{
+				"gpt-5.5": {
+					Unavailable:    true,
+					NextRetryAfter: time.Now().Add(time.Hour),
+				},
+			}
+		}
+	}
+
+	secondTurn := []byte(`{
+		"instructions": "system prompt",
+		"previous_response_id": "resp-1",
+		"input": [
+			{"type":"message","role":"user","content":"hello"},
+			{"type":"message","role":"assistant","content":"hi"},
+			{"type":"message","role":"user","content":"continue"}
+		]
+	}`)
+	_, err = selector.Pick(context.Background(), "codex", "gpt-5.5", cliproxyexecutor.Options{OriginalRequest: secondTurn}, auths)
+	if err == nil {
+		t.Fatalf("Pick() second turn error = nil, want auth_unavailable")
+	}
+	var authErr *Error
+	if !errors.As(err, &authErr) {
+		t.Fatalf("Pick() second turn error type = %T, want *Error", err)
+	}
+	if authErr.Code != "auth_unavailable" {
+		t.Fatalf("error code = %q, want auth_unavailable", authErr.Code)
+	}
+}
+
+func TestSessionAffinitySelector_PreviousResponseIDUsesExecutionSessionMetadata(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a"},
+		{ID: "auth-b"},
+	}
+	metadata := map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "ws-session-1"}
+	first, err := selector.Pick(context.Background(), "codex", "gpt-5.5", cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"input":[{"type":"function_call_output","call_id":"call-1","output":"ok"}]}`),
+		Metadata:        metadata,
+	}, auths)
+	if err != nil {
+		t.Fatalf("Pick() first turn error = %v", err)
+	}
+	if first == nil {
+		t.Fatalf("Pick() first turn returned nil")
+	}
+
+	for _, auth := range auths {
+		if auth.ID == first.ID {
+			auth.ModelStates = map[string]*ModelState{
+				"gpt-5.5": {
+					Unavailable:    true,
+					NextRetryAfter: time.Now().Add(time.Hour),
+				},
+			}
+		}
+	}
+
+	_, err = selector.Pick(context.Background(), "codex", "gpt-5.5", cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"previous_response_id":"resp-1","input":[{"type":"function_call_output","call_id":"call-2","output":"ok"}]}`),
+		Metadata:        metadata,
+	}, auths)
+	if err == nil {
+		t.Fatalf("Pick() continuation error = nil, want auth_unavailable")
+	}
+	var authErr *Error
+	if !errors.As(err, &authErr) {
+		t.Fatalf("Pick() continuation error type = %T, want *Error", err)
+	}
+	if authErr.Code != "auth_unavailable" {
+		t.Fatalf("error code = %q, want auth_unavailable", authErr.Code)
+	}
+}
+
+func TestRoundRobinSelectorPick_MixedDownstreamWebsocketPrefersWebsocketAuth(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "codex-http", Provider: "codex", Attributes: map[string]string{"priority": "10"}},
+		{ID: "codex-ws-a", Provider: "codex", Attributes: map[string]string{"priority": "0", "websockets": "true"}},
+		{ID: "codex-ws-b", Provider: "codex", Attributes: map[string]string{"priority": "0", "websockets": "true"}},
+		{ID: "gemini-a", Provider: "gemini", Attributes: map[string]string{"priority": "10"}},
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	want := []string{"codex-ws-a", "codex-ws-b", "codex-ws-a"}
+	for index, wantID := range want {
+		got, err := selector.Pick(ctx, "mixed", "gpt-5.5", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", index, err)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", index)
+		}
+		if got.ID != wantID {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		}
+	}
+}
+
 func TestRoundRobinSelectorPick_MixedVirtualAndNonVirtualFallsBackToFlat(t *testing.T) {
 	t.Parallel()
 
@@ -773,6 +967,18 @@ func TestExtractSessionID_Headers(t *testing.T) {
 	want := "header:my-explicit-session"
 	if got != want {
 		t.Errorf("ExtractSessionID() with header = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_ExecutionSessionMetadata(t *testing.T) {
+	t.Parallel()
+
+	metadata := map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "ws-session-1"}
+
+	got := ExtractSessionID(nil, nil, metadata)
+	want := "exec:ws-session-1"
+	if got != want {
+		t.Errorf("ExtractSessionID() with execution_session_id = %q, want %q", got, want)
 	}
 }
 

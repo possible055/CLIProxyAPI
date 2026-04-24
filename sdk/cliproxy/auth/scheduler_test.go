@@ -234,6 +234,36 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledAcrossPriorities(t *
 	}
 }
 
+func TestSchedulerPick_MixedDownstreamWebsocketPrefersCodexWebsocketAuth(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "gemini-a", Provider: "gemini", Attributes: map[string]string{"priority": "10"}},
+		&Auth{ID: "codex-http", Provider: "codex", Attributes: map[string]string{"priority": "10"}},
+		&Auth{ID: "codex-ws-a", Provider: "codex", Attributes: map[string]string{"priority": "0", "websockets": "true"}},
+		&Auth{ID: "codex-ws-b", Provider: "codex", Attributes: map[string]string{"priority": "0", "websockets": "true"}},
+	)
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	want := []string{"codex-ws-a", "codex-ws-b", "codex-ws-a"}
+	for index, wantID := range want {
+		got, provider, errPick := scheduler.pickMixed(ctx, []string{"gemini", "codex"}, "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickMixed() #%d error = %v", index, errPick)
+		}
+		if provider != "codex" {
+			t.Fatalf("pickMixed() #%d provider = %q, want codex", index, provider)
+		}
+		if got == nil {
+			t.Fatalf("pickMixed() #%d auth = nil", index)
+		}
+		if got.ID != wantID {
+			t.Fatalf("pickMixed() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		}
+	}
+}
+
 func TestSchedulerPick_MixedProvidersUsesWeightedProviderRotationOverReadyCandidates(t *testing.T) {
 	t.Parallel()
 

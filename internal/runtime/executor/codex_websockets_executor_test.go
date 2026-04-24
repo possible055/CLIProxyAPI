@@ -9,7 +9,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -29,6 +31,52 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 	if got := gjson.GetBytes(wsReqBody, "type").String(); got == "response.append" {
 		t.Fatalf("unexpected websocket request type: %s", got)
+	}
+}
+
+func TestPrepareCodexWebsocketBodyPreservesPreviousResponseIDAndAppliesCompatibility(t *testing.T) {
+	exec := NewCodexWebsocketsExecutor(nil)
+	raw := []byte(`{
+		"model": "gpt-5.5",
+		"previous_response_id": "resp-1",
+		"input": [{"type":"function_call_output","call_id":"call-1","output":"ok"}],
+		"max_output_tokens": 100,
+		"temperature": 0.5,
+		"stream": false
+	}`)
+
+	body, err := exec.prepareCodexWebsocketBody("gpt-5.5", cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: raw,
+	}, cliproxyexecutor.Options{
+		OriginalRequest: raw,
+		SourceFormat:    sdktranslator.FromString("openai-response"),
+		Stream:          true,
+	}, true)
+	if err != nil {
+		t.Fatalf("prepareCodexWebsocketBody() error = %v", err)
+	}
+
+	if got := gjson.GetBytes(body, "previous_response_id").String(); got != "resp-1" {
+		t.Fatalf("previous_response_id = %q, want resp-1; body=%s", got, body)
+	}
+	if !gjson.GetBytes(body, "stream").Bool() {
+		t.Fatalf("stream must be true: %s", body)
+	}
+	if gjson.GetBytes(body, "store").Bool() {
+		t.Fatalf("store must be false: %s", body)
+	}
+	if gjson.GetBytes(body, "max_output_tokens").Exists() {
+		t.Fatalf("max_output_tokens must be stripped: %s", body)
+	}
+	if gjson.GetBytes(body, "temperature").Exists() {
+		t.Fatalf("temperature must be stripped: %s", body)
+	}
+	if got := gjson.GetBytes(body, "include.0").String(); got != "reasoning.encrypted_content" {
+		t.Fatalf("include.0 = %q, want reasoning.encrypted_content; body=%s", got, body)
+	}
+	if !gjson.GetBytes(body, "instructions").Exists() {
+		t.Fatalf("instructions must exist: %s", body)
 	}
 }
 

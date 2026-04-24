@@ -330,6 +330,20 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	}
 
 	predicate := triedPredicate(tried)
+	if cliproxyexecutor.DownstreamWebsocket(ctx) && pinnedAuthID == "" && containsProvider(normalized, "codex") {
+		providerState := s.providers["codex"]
+		if providerState != nil {
+			shard := providerState.ensureModelLocked(modelKey, time.Now())
+			if shard != nil {
+				wsPredicate := func(entry *scheduledAuth) bool {
+					return predicate(entry) && entry != nil && codexWebsocketCandidate("codex", entry.auth)
+				}
+				if picked := shard.pickReadyLocked(false, s.strategy, wsPredicate); picked != nil {
+					return picked, "codex", nil
+				}
+			}
+		}
+	}
 	candidateShards := make([]*modelScheduler, len(normalized))
 	bestPriority := 0
 	hasCandidate := false
