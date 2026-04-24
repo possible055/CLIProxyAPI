@@ -109,3 +109,46 @@ func TestManagerExecute_OAuthAliasBypassesBlockedRouteModel(t *testing.T) {
 		t.Fatalf("execute model = %q, want %q", gotModels[0], targetModel)
 	}
 }
+
+func TestManagerExecute_CodexAutoReviewPassesThrough(t *testing.T) {
+	const (
+		provider = "codex"
+		model    = "codex-auto-review"
+		authID   = "codex-auto-review-pass-through-auth"
+	)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, provider, []*registry.ModelInfo{{ID: model, OwnedBy: "openai", Type: "openai"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	manager := NewManager(nil, nil, nil)
+	executor := &aliasRoutingExecutor{id: provider}
+	manager.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       authID,
+		Provider: provider,
+		Status:   StatusActive,
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	resp, errExecute := manager.Execute(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success", errExecute)
+	}
+	if string(resp.Payload) != model {
+		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), model)
+	}
+
+	gotModels := executor.ExecuteModels()
+	if len(gotModels) != 1 {
+		t.Fatalf("execute models len = %d, want 1", len(gotModels))
+	}
+	if gotModels[0] != model {
+		t.Fatalf("execute model = %q, want %q", gotModels[0], model)
+	}
+}

@@ -52,3 +52,32 @@ func TestGetAvailableModelsInvalidatesCacheOnRegistryChanges(t *testing.T) {
 		t.Fatalf("expected model to reappear after resume, got %d", len(models))
 	}
 }
+
+func TestGetAvailableModelsKeepsCodexSuspendedModelsListed(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("codex-1", "codex", []*ModelInfo{{ID: "gpt-5.4-mini", OwnedBy: "openai", Type: "openai"}})
+
+	r.SuspendClientModel("codex-1", "gpt-5.4-mini", "model_not_supported")
+
+	models := r.GetAvailableModels("openai")
+	if !modelMapContainsID(models, "gpt-5.4-mini") {
+		t.Fatalf("expected suspended codex model to remain listed, got %+v", models)
+	}
+
+	providerModels := r.GetAvailableModelsByProvider("codex")
+	if findModelInfo(providerModels, "gpt-5.4-mini") == nil {
+		t.Fatalf("expected suspended codex provider model to remain listed, got %+v", providerModels)
+	}
+}
+
+func modelMapContainsID(models []map[string]any, id string) bool {
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if got, _ := model["id"].(string); got == id {
+			return true
+		}
+	}
+	return false
+}

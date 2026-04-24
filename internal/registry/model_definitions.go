@@ -6,7 +6,97 @@ import (
 	"strings"
 )
 
-const codexBuiltinImageModelID = "gpt-image-2"
+const (
+	codexBuiltinImageModelID      = "gpt-image-2"
+	codexBuiltinAutoReviewModelID = "codex-auto-review"
+)
+
+var fixedCodexModelInfos = map[string]*ModelInfo{
+	"gpt-5.2": {
+		ID:                  "gpt-5.2",
+		Object:              "model",
+		Created:             1765440000,
+		OwnedBy:             "openai",
+		Type:                "openai",
+		DisplayName:         "GPT 5.2",
+		Version:             "gpt-5.2",
+		Description:         "Stable version of GPT 5.2",
+		ContextLength:       400000,
+		MaxCompletionTokens: 128000,
+		SupportedParameters: []string{"tools"},
+		Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
+	},
+	"gpt-5.3-codex": {
+		ID:                  "gpt-5.3-codex",
+		Object:              "model",
+		Created:             1770307200,
+		OwnedBy:             "openai",
+		Type:                "openai",
+		DisplayName:         "GPT 5.3 Codex",
+		Version:             "gpt-5.3",
+		Description:         "Stable version of GPT 5.3 Codex, The best model for coding and agentic tasks across domains.",
+		ContextLength:       400000,
+		MaxCompletionTokens: 128000,
+		SupportedParameters: []string{"tools"},
+		Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+	},
+	"gpt-5.3-codex-spark": {
+		ID:                  "gpt-5.3-codex-spark",
+		Object:              "model",
+		Created:             1770912000,
+		OwnedBy:             "openai",
+		Type:                "openai",
+		DisplayName:         "GPT 5.3 Codex Spark",
+		Version:             "gpt-5.3",
+		Description:         "Ultra-fast coding model.",
+		ContextLength:       128000,
+		MaxCompletionTokens: 128000,
+		SupportedParameters: []string{"tools"},
+		Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+	},
+	"gpt-5.4": {
+		ID:                  "gpt-5.4",
+		Object:              "model",
+		Created:             1772668800,
+		OwnedBy:             "openai",
+		Type:                "openai",
+		DisplayName:         "GPT 5.4",
+		Version:             "gpt-5.4",
+		Description:         "Stable version of GPT 5.4",
+		ContextLength:       1050000,
+		MaxCompletionTokens: 128000,
+		SupportedParameters: []string{"tools"},
+		Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+	},
+	"gpt-5.4-mini": {
+		ID:                  "gpt-5.4-mini",
+		Object:              "model",
+		Created:             1773705600,
+		OwnedBy:             "openai",
+		Type:                "openai",
+		DisplayName:         "GPT 5.4 Mini",
+		Version:             "gpt-5.4-mini",
+		Description:         "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
+		ContextLength:       400000,
+		MaxCompletionTokens: 128000,
+		SupportedParameters: []string{"tools"},
+		Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+	},
+	"gpt-5.5": {
+		ID:                  "gpt-5.5",
+		Object:              "model",
+		Created:             1776902400,
+		OwnedBy:             "openai",
+		Type:                "openai",
+		DisplayName:         "GPT 5.5",
+		Version:             "gpt-5.5",
+		Description:         "Frontier model for complex coding, research, and real-world work.",
+		ContextLength:       272000,
+		MaxCompletionTokens: 128000,
+		SupportedParameters: []string{"tools"},
+		Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+	},
+}
 
 // staticModelsJSON mirrors the top-level structure of models.json.
 type staticModelsJSON struct {
@@ -50,22 +140,22 @@ func GetAIStudioModels() []*ModelInfo {
 
 // GetCodexFreeModels returns model definitions for the Codex free plan tier.
 func GetCodexFreeModels() []*ModelInfo {
-	return WithCodexBuiltins(cloneModelInfos(getModels().CodexFree))
+	return fixedCodexModels("gpt-5.2", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini")
 }
 
 // GetCodexTeamModels returns model definitions for the Codex team plan tier.
 func GetCodexTeamModels() []*ModelInfo {
-	return WithCodexBuiltins(cloneModelInfos(getModels().CodexTeam))
+	return fixedCodexModels("gpt-5.2", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5")
 }
 
 // GetCodexPlusModels returns model definitions for the Codex plus plan tier.
 func GetCodexPlusModels() []*ModelInfo {
-	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPlus))
+	return fixedCodexModels("gpt-5.2", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5")
 }
 
 // GetCodexProModels returns model definitions for the Codex pro plan tier.
 func GetCodexProModels() []*ModelInfo {
-	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPro))
+	return fixedCodexModels("gpt-5.2", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5")
 }
 
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
@@ -82,7 +172,23 @@ func GetAntigravityModels() []*ModelInfo {
 // not depend on remote models.json updates. Built-ins replace any matching IDs
 // already present in the provided slice.
 func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, codexBuiltinImageModelInfo())
+	return upsertModelInfos(models, codexBuiltinImageModelInfo(), codexBuiltinAutoReviewModelInfo())
+}
+
+func fixedCodexModels(ids ...string) []*ModelInfo {
+	models := make([]*ModelInfo, 0, len(ids)+2)
+	for _, id := range ids {
+		model := fixedCodexModelInfo(id)
+		if model == nil {
+			continue
+		}
+		models = append(models, model)
+	}
+	return WithCodexBuiltins(models)
+}
+
+func fixedCodexModelInfo(id string) *ModelInfo {
+	return cloneModelInfo(fixedCodexModelInfos[id])
 }
 
 func codexBuiltinImageModelInfo() *ModelInfo {
@@ -94,6 +200,23 @@ func codexBuiltinImageModelInfo() *ModelInfo {
 		Type:        "openai",
 		DisplayName: "GPT Image 2",
 		Version:     codexBuiltinImageModelID,
+	}
+}
+
+func codexBuiltinAutoReviewModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                  codexBuiltinAutoReviewModelID,
+		Object:              "model",
+		Created:             1776902400,
+		OwnedBy:             "openai",
+		Type:                "openai",
+		DisplayName:         "Codex Auto Review",
+		Version:             codexBuiltinAutoReviewModelID,
+		Description:         "Codex auto-review routing model.",
+		ContextLength:       272000,
+		MaxCompletionTokens: 128000,
+		SupportedParameters: []string{"tools"},
+		Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
 	}
 }
 
@@ -205,7 +328,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Vertex,
 		data.GeminiCLI,
 		data.AIStudio,
-		data.CodexPro,
+		GetCodexProModels(),
 		data.Kimi,
 		data.Antigravity,
 	}

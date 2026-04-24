@@ -151,6 +151,38 @@ func TestSchedulerPick_PromotesExpiredCooldownBeforePick(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_SkipsSuspendedCodexAuthForFixedModel(t *testing.T) {
+	model := "codex-auto-review"
+	registerSchedulerModels(t, "codex", model, "codex-suspended", "codex-ready")
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{
+			ID:       "codex-suspended",
+			Provider: "codex",
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					Unavailable:    true,
+					NextRetryAfter: time.Now().Add(1 * time.Hour),
+				},
+			},
+		},
+		&Auth{ID: "codex-ready", Provider: "codex"},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickSingle() auth = nil")
+	}
+	if got.ID != "codex-ready" {
+		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "codex-ready")
+	}
+}
+
 func TestSchedulerPick_GeminiVirtualParentUsesTwoLevelRotation(t *testing.T) {
 	t.Parallel()
 

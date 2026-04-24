@@ -84,6 +84,26 @@ func TestPrepareCodexWebsocketBodyPreservesPreviousResponseIDAndAppliesCompatibi
 	}
 }
 
+func TestPrepareCodexWebsocketBodyPreservesCodexAutoReviewModel(t *testing.T) {
+	exec := NewCodexWebsocketsExecutor(nil)
+	raw := []byte(`{"model":"codex-auto-review","input":"review this diff","stream":false}`)
+
+	body, err := exec.prepareCodexWebsocketBody("codex-auto-review", cliproxyexecutor.Request{
+		Model:   "codex-auto-review",
+		Payload: raw,
+	}, cliproxyexecutor.Options{
+		OriginalRequest: raw,
+		SourceFormat:    sdktranslator.FromString("openai-response"),
+		Stream:          true,
+	}, true)
+	if err != nil {
+		t.Fatalf("prepareCodexWebsocketBody() error = %v", err)
+	}
+	if got := gjson.GetBytes(body, "model").String(); got != "codex-auto-review" {
+		t.Fatalf("model = %q, want codex-auto-review; body=%s", got, body)
+	}
+}
+
 func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) {
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, nil, "", nil)
 

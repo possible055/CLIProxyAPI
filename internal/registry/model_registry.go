@@ -821,7 +821,7 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 			effectiveClients = 0
 		}
 
-		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
+		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) || keepsSuspendedCodexModelListed(handlerType, registration) {
 			model := r.convertModelToMap(registration.Info, handlerType)
 			if model != nil {
 				models = append(models, model)
@@ -830,6 +830,16 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 	}
 
 	return models, expiresAt
+}
+
+func keepsSuspendedCodexModelListed(handlerType string, registration *ModelRegistration) bool {
+	if strings.ToLower(strings.TrimSpace(handlerType)) != "openai" {
+		return false
+	}
+	if registration == nil || registration.Count <= 0 || len(registration.Providers) == 0 {
+		return false
+	}
+	return registration.Providers["codex"] > 0
 }
 
 func cloneModelMaps(models []map[string]any) []map[string]any {
@@ -979,7 +989,7 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 			effectiveClients = 0
 		}
 
-		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
+		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) || (provider == "codex" && availableClients > 0) {
 			if entry.info != nil {
 				result = append(result, cloneModelInfo(entry.info))
 				continue

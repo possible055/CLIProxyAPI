@@ -3,6 +3,7 @@ package cliproxy
 import (
 	"testing"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
@@ -61,4 +62,25 @@ func TestEnsureExecutorsForAuthWithMode_CodexForceReplace(t *testing.T) {
 	if firstExecutor == secondExecutor {
 		t.Fatal("expected codex executor replacement in force mode")
 	}
+}
+
+func TestBuildCodexConfigModelsAppendsBuiltins(t *testing.T) {
+	models := buildCodexConfigModels(&internalconfig.CodexKey{
+		Models: []internalconfig.CodexModel{{Name: "custom-codex-model"}},
+	})
+
+	for _, id := range []string{"custom-codex-model", "gpt-image-2", "codex-auto-review"} {
+		if !cliproxyModelsContainID(models, id) {
+			t.Fatalf("expected codex config models to include %q, got %+v", id, models)
+		}
+	}
+}
+
+func cliproxyModelsContainID(models []*ModelInfo, id string) bool {
+	for _, model := range models {
+		if model != nil && model.ID == id {
+			return true
+		}
+	}
+	return false
 }

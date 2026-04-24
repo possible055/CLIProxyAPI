@@ -190,8 +190,8 @@ func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 }
 
 // detectChangedProviders compares two model catalogs and returns provider names
-// whose model definitions differ. Codex tiers (free/team/plus/pro) are grouped
-// under a single "codex" provider.
+// whose model definitions differ. Codex uses a fixed in-process catalog, so
+// remote Codex section changes are intentionally ignored.
 func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 	if oldData == nil || newData == nil {
 		return nil
@@ -209,10 +209,6 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"vertex", oldData.Vertex, newData.Vertex},
 		{"gemini-cli", oldData.GeminiCLI, newData.GeminiCLI},
 		{"aistudio", oldData.AIStudio, newData.AIStudio},
-		{"codex", oldData.CodexFree, newData.CodexFree},
-		{"codex", oldData.CodexTeam, newData.CodexTeam},
-		{"codex", oldData.CodexPlus, newData.CodexPlus},
-		{"codex", oldData.CodexPro, newData.CodexPro},
 		{"kimi", oldData.Kimi, newData.Kimi},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
 	}
