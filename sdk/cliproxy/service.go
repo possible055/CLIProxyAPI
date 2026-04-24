@@ -462,6 +462,23 @@ func (s *Service) rebindExecutors() {
 	}
 }
 
+func (s *Service) registerLoadedAuthModels(ctx context.Context) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	for _, auth := range s.coreManager.List() {
+		if auth == nil || auth.ID == "" {
+			continue
+		}
+		if !auth.Disabled {
+			s.ensureExecutorsForAuth(auth)
+		}
+		s.registerModelsForAuth(auth)
+		s.coreManager.ReconcileRegistryModelStates(ctx, auth.ID)
+		s.coreManager.RefreshSchedulerEntry(auth.ID)
+	}
+}
+
 // Run starts the service and blocks until the context is cancelled or the server stops.
 // It initializes all components including authentication, file watching, HTTP server,
 // and starts processing requests. The method blocks until the context is cancelled.
@@ -499,6 +516,7 @@ func (s *Service) Run(ctx context.Context) error {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
 		}
+		s.registerLoadedAuthModels(ctx)
 	}
 
 	tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
