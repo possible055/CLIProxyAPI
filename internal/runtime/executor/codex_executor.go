@@ -176,7 +176,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = normalizeCodexInstructions(body)
@@ -417,7 +416,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body, _ = sjson.SetBytes(body, "model", baseModel)
@@ -529,7 +527,6 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body, _ = sjson.SetBytes(body, "stream", false)
@@ -806,7 +803,7 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
 	errCode := statusCode
-	if isCodexModelCapacityError(body) {
+	if isCodexModelCapacityError(body) || isCodexUsageLimitError(body) {
 		errCode = http.StatusTooManyRequests
 	}
 	err := statusErr{code: errCode, msg: string(body)}
@@ -864,11 +861,47 @@ func isCodexModelCapacityError(errorBody []byte) bool {
 	return false
 }
 
+func isCodexUsageLimitError(errorBody []byte) bool {
+	if len(errorBody) == 0 {
+		return false
+	}
+	for _, candidate := range codexErrorTextCandidates(errorBody) {
+		lower := strings.ToLower(strings.TrimSpace(candidate))
+		if lower == "" {
+			continue
+		}
+		if strings.Contains(lower, "usage_limit_reached") ||
+			strings.Contains(lower, "usage limit") ||
+			strings.Contains(lower, "insufficient_quota") ||
+			strings.Contains(lower, "credit balance") ||
+			strings.Contains(lower, "balance is too low") {
+			return true
+		}
+	}
+	return false
+}
+
+func codexErrorTextCandidates(errorBody []byte) []string {
+	if len(errorBody) == 0 {
+		return nil
+	}
+	return []string{
+		gjson.GetBytes(errorBody, "error.type").String(),
+		gjson.GetBytes(errorBody, "error.code").String(),
+		gjson.GetBytes(errorBody, "error.message").String(),
+		gjson.GetBytes(errorBody, "error").String(),
+		gjson.GetBytes(errorBody, "type").String(),
+		gjson.GetBytes(errorBody, "code").String(),
+		gjson.GetBytes(errorBody, "message").String(),
+		string(errorBody),
+	}
+}
+
 func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.Duration {
 	if statusCode != http.StatusTooManyRequests || len(errorBody) == 0 {
 		return nil
 	}
-	if strings.TrimSpace(gjson.GetBytes(errorBody, "error.type").String()) != "usage_limit_reached" {
+	if !isCodexUsageLimitError(errorBody) {
 		return nil
 	}
 	if resetsAt := gjson.GetBytes(errorBody, "error.resets_at").Int(); resetsAt > 0 {
@@ -882,7 +915,61 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 		retryAfter := time.Duration(resetsInSeconds) * time.Second
 		return &retryAfter
 	}
+	for _, candidate := range codexErrorTextCandidates(errorBody) {
+		if retryAfter := parseCodexTryAgainAt(candidate, now); retryAfter != nil {
+			return retryAfter
+		}
+	}
 	return nil
+}
+
+func parseCodexTryAgainAt(message string, now time.Time) *time.Duration {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return nil
+	}
+	lower := strings.ToLower(message)
+	marker := "try again at "
+	index := strings.Index(lower, marker)
+	if index < 0 {
+		return nil
+	}
+	raw := strings.TrimSpace(message[index+len(marker):])
+	fields := strings.Fields(raw)
+	if len(fields) == 0 {
+		return nil
+	}
+
+	timeText := strings.Trim(fields[0], ".,;!?)\"]}")
+	if len(fields) > 1 {
+		meridiem := strings.ToUpper(strings.Trim(fields[1], ".,;!?)\"]}"))
+		if meridiem == "AM" || meridiem == "PM" {
+			timeText += " " + meridiem
+		}
+	}
+
+	layouts := []string{"3:04 PM", "3 PM", "15:04", "15"}
+	var parsed time.Time
+	var parsedOK bool
+	location := now.Location()
+	for _, layout := range layouts {
+		value, errParse := time.ParseInLocation(layout, timeText, location)
+		if errParse == nil {
+			parsed = value
+			parsedOK = true
+			break
+		}
+	}
+	if !parsedOK {
+		return nil
+	}
+
+	next := time.Date(now.Year(), now.Month(), now.Day(), parsed.Hour(), parsed.Minute(), 0, 0, location)
+	if !next.After(now) {
+		next = next.Add(24 * time.Hour)
+	}
+	retryAfter := next.Sub(now)
+	return &retryAfter
 }
 
 func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {

@@ -619,7 +619,6 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketBody(baseModel string, re
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = normalizeCodexInstructions(body)
@@ -974,9 +973,16 @@ func parseCodexWebsocketError(payload []byte) (error, bool) {
 		out, _ = sjson.SetBytes(out, "error.message", http.StatusText(status))
 	}
 
+	if isCodexUsageLimitError(out) {
+		status = http.StatusTooManyRequests
+	}
+	statusError := statusErr{code: status, msg: string(out)}
+	if retryAfter := parseCodexRetryAfter(status, out, time.Now()); retryAfter != nil {
+		statusError.retryAfter = retryAfter
+	}
 	headers := parseCodexWebsocketErrorHeaders(payload)
 	return statusErrWithHeaders{
-		statusErr: statusErr{code: status, msg: string(out)},
+		statusErr: statusError,
 		headers:   headers,
 	}, true
 }

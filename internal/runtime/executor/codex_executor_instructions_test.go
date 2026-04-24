@@ -34,7 +34,7 @@ func TestCodexExecutorExecuteNormalizesNullInstructions(t *testing.T) {
 
 	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.4",
-		Payload: []byte(`{"model":"gpt-5.4","instructions":null,"input":"hello"}`),
+		Payload: []byte(`{"model":"gpt-5.4","instructions":null,"input":"hello","prompt_cache_retention":"24h"}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FromString("openai-response"),
 		Stream:       false,
@@ -50,6 +50,9 @@ func TestCodexExecutorExecuteNormalizesNullInstructions(t *testing.T) {
 	}
 	if gjson.GetBytes(gotBody, "instructions").String() != "" {
 		t.Fatalf("instructions = %q, want empty string", gjson.GetBytes(gotBody, "instructions").String())
+	}
+	if got := gjson.GetBytes(gotBody, "prompt_cache_retention").String(); got != "24h" {
+		t.Fatalf("prompt_cache_retention = %q, want 24h; body=%s", got, gotBody)
 	}
 }
 
@@ -73,7 +76,7 @@ func TestCodexExecutorExecuteStreamNormalizesNullInstructions(t *testing.T) {
 
 	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.4",
-		Payload: []byte(`{"model":"gpt-5.4","instructions":null,"input":"hello"}`),
+		Payload: []byte(`{"model":"gpt-5.4","instructions":null,"input":"hello","prompt_cache_retention":"24h"}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FromString("openai-response"),
 		Stream:       true,
@@ -91,6 +94,9 @@ func TestCodexExecutorExecuteStreamNormalizesNullInstructions(t *testing.T) {
 	}
 	if gjson.GetBytes(gotBody, "instructions").String() != "" {
 		t.Fatalf("instructions = %q, want empty string", gjson.GetBytes(gotBody, "instructions").String())
+	}
+	if got := gjson.GetBytes(gotBody, "prompt_cache_retention").String(); got != "24h" {
+		t.Fatalf("prompt_cache_retention = %q, want 24h; body=%s", got, gotBody)
 	}
 }
 

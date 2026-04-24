@@ -557,3 +557,42 @@ func TestManager_SchedulerTracksMarkResultCooldownAndRecovery(t *testing.T) {
 		t.Fatalf("len(seen) = %d, want %d", len(seen), 2)
 	}
 }
+
+func TestManager_SchedulerSkipsCodexUsageLimitCooldown(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	model := "gpt-5.5"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("codex-a", "codex", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient("codex-b", "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("codex-a")
+		reg.UnregisterClient("codex-b")
+	})
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "codex-a", Provider: "codex"}); errRegister != nil {
+		t.Fatalf("Register(codex-a) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "codex-b", Provider: "codex"}); errRegister != nil {
+		t.Fatalf("Register(codex-b) error = %v", errRegister)
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   "codex-a",
+		Provider: "codex",
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    `{"error":{"type":"invalid_request_error","message":"You've hit your usage limit."}}`,
+		},
+	})
+
+	got, errPick := manager.scheduler.pickSingle(context.Background(), "codex", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("scheduler.pickSingle() after usage-limit cooldown error = %v", errPick)
+	}
+	if got == nil || got.ID != "codex-b" {
+		t.Fatalf("scheduler.pickSingle() after usage-limit cooldown auth = %v, want codex-b", got)
+	}
+}

@@ -58,6 +58,19 @@ func TestParseCodexRetryAfter(t *testing.T) {
 			t.Fatalf("expected nil for non-usage_limit_reached, got %v", *got)
 		}
 	})
+
+	t.Run("try again at local time", func(t *testing.T) {
+		location := time.FixedZone("local", 8*60*60)
+		localNow := time.Date(2026, 4, 24, 11, 30, 0, 0, location)
+		body := []byte(`{"error":{"type":"invalid_request_error","message":"You've hit your usage limit. To get more access now, send a request to your admin or try again at 12:00 PM."}}`)
+		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, localNow)
+		if retryAfter == nil {
+			t.Fatalf("expected retryAfter, got nil")
+		}
+		if *retryAfter != 30*time.Minute {
+			t.Fatalf("retryAfter = %v, want %v", *retryAfter, 30*time.Minute)
+		}
+	})
 }
 
 func TestNewCodexStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {
@@ -70,6 +83,16 @@ func TestNewCodexStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {
 	}
 	if err.RetryAfter() != nil {
 		t.Fatalf("expected nil explicit retryAfter for capacity fallback, got %v", *err.RetryAfter())
+	}
+}
+
+func TestNewCodexStatusErrTreatsUsageLimitBadRequestAsRateLimit(t *testing.T) {
+	body := []byte(`{"error":{"type":"invalid_request_error","message":"You've hit your usage limit. To get more access now, send a request to your admin or try again at 12:00 PM."}}`)
+
+	err := newCodexStatusErr(http.StatusBadRequest, body)
+
+	if got := err.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
 	}
 }
 

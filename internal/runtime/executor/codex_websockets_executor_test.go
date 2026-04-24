@@ -40,6 +40,7 @@ func TestPrepareCodexWebsocketBodyPreservesPreviousResponseIDAndAppliesCompatibi
 		"model": "gpt-5.5",
 		"previous_response_id": "resp-1",
 		"input": [{"type":"function_call_output","call_id":"call-1","output":"ok"}],
+		"prompt_cache_retention": "24h",
 		"max_output_tokens": 100,
 		"temperature": 0.5,
 		"stream": false
@@ -59,6 +60,9 @@ func TestPrepareCodexWebsocketBodyPreservesPreviousResponseIDAndAppliesCompatibi
 
 	if got := gjson.GetBytes(body, "previous_response_id").String(); got != "resp-1" {
 		t.Fatalf("previous_response_id = %q, want resp-1; body=%s", got, body)
+	}
+	if got := gjson.GetBytes(body, "prompt_cache_retention").String(); got != "24h" {
+		t.Fatalf("prompt_cache_retention = %q, want 24h; body=%s", got, body)
 	}
 	if !gjson.GetBytes(body, "stream").Bool() {
 		t.Fatalf("stream must be true: %s", body)
@@ -100,6 +104,37 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	}
 	if got := headers.Get("X-Client-Request-Id"); got != "" {
 		t.Fatalf("X-Client-Request-Id = %q, want empty", got)
+	}
+}
+
+func TestParseCodexWebsocketErrorTreatsUsageLimitAsRateLimit(t *testing.T) {
+	payload := []byte(`{
+		"type": "error",
+		"status": 400,
+		"headers": {"retry-after": "60"},
+		"error": {
+			"type": "invalid_request_error",
+			"message": "You've hit your usage limit. To get more access now, send a request to your admin or try again at 12:00 PM."
+		}
+	}`)
+
+	err, ok := parseCodexWebsocketError(payload)
+	if !ok {
+		t.Fatalf("parseCodexWebsocketError() ok = false")
+	}
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error type %T does not expose StatusCode()", err)
+	}
+	if got := status.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	withHeaders, ok := err.(interface{ Headers() http.Header })
+	if !ok {
+		t.Fatalf("error type %T does not expose Headers()", err)
+	}
+	if got := withHeaders.Headers().Get("retry-after"); got != "60" {
+		t.Fatalf("retry-after header = %q, want 60", got)
 	}
 }
 
